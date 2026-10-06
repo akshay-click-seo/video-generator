@@ -1,79 +1,47 @@
 
-# Dubai 3D Pop-Out Video Generator
+# Dubai 3D Pop-Out Video Generator — FREE
 
-A Streamlit app that turns a luxury building image into a cinematic Dubai real-estate pop-out video using the Runway API.
+This version removes Runway completely.
 
-## 1. Requirements
+It creates a local cinematic 3D pop-out effect using:
+- Python
+- Streamlit
+- Pillow
+- NumPy
+- ImageIO + FFmpeg
 
-- Python 3.8+
-- A Runway Dev API key
-- Internet connection
+No Runway API key and no paid video API are required.
 
-Runway's Python SDK supports Python 3.8+.
-
-## 2. Install
+## Run locally
 
 ```bash
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-```
-
-If `python3` is unavailable, install Python 3.11/3.12 first.
-
-## 3. Add your Runway API key
-
-### macOS/Linux
-
-```bash
-export RUNWAYML_API_SECRET="YOUR_RUNWAY_API_KEY"
-```
-
-### Or Streamlit secrets
-
-Create:
-
-```text
-.streamlit/secrets.toml
-```
-
-and add:
-
-```toml
-RUNWAYML_API_SECRET = "YOUR_RUNWAY_API_KEY"
-```
-
-Never upload your API key to GitHub.
-
-## 4. Run
-
-```bash
 streamlit run app.py
 ```
 
-Then open the local URL shown by Streamlit.
+## Deploy on Streamlit Cloud
 
-## 5. Best input
+Upload these files to your GitHub repository:
 
-Use a transparent PNG of the building. The building should be:
-- centered
-- high resolution
-- cleanly cut out
-- without text or logos
+```text
+app.py
+requirements.txt
+```
 
-## 6. Output formats
+Then set Main file path to:
 
-- 9:16 — Reels / Stories
-- 1:1 — Feed
-- 16:9 — YouTube / Website
+```text
+app.py
+```
+
+No Streamlit Secrets are needed.
 
 ## Important
 
-The first version sends the building image as the video model's first-frame reference. The AI creates the cinematic environment and pop-out motion from the prompt.
+This is a procedural 3D/parallax-style effect, not an AI video model.
+For the strongest result, upload a clean transparent PNG of the building.
 
-For a more controlled production version, add a two-stage pipeline:
-1. Generate/select the Dubai background.
-2. Automatically composite the exact transparent building over it.
-3. Send the final composite to image-to-video.
-
-That version gives much stronger control over the exact placement of the building and background.
+If FFmpeg is unavailable on a deployment environment, imageio-ffmpeg
+bundles an FFmpeg executable and should normally handle MP4 creation.

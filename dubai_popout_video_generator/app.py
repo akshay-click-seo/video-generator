@@ -1,339 +1,189 @@
 
-import base64
 import io
-import os
 from pathlib import Path
-
+import numpy as np
 import streamlit as st
-from PIL import Image
-from runwayml import RunwayML, TaskFailedError, TaskTimeoutError
+from PIL import Image, ImageOps, ImageFilter
+import imageio.v2 as imageio
 
-st.set_page_config(
-    page_title="Dubai 3D Pop-Out Video Generator",
-    page_icon="🏙️",
-    layout="wide",
-)
+st.set_page_config(page_title="Dubai 3D Pop-Out Generator", page_icon="🏙️", layout="wide")
 
-# -----------------------------
-# Helpers
-# -----------------------------
 RATIOS = {
-    "9:16 — Reel / Story": ("720:1280", (720, 1280)),
-    "1:1 — Feed": ("960:960", (960, 960)),
-    "16:9 — YouTube / Website": ("1280:720", (1280, 720)),
+    "9:16 — Reel": (720, 1280),
+    "1:1 — Feed": (900, 900),
+    "16:9 — Landscape": (1280, 720),
 }
 
-BACKGROUND_PROMPTS = {
-    "Dubai Marina — Sunset": (
-        "Photorealistic luxury Dubai Marina waterfront at golden hour, "
-        "modern glass skyscrapers, elegant waterfront promenade, palm trees, "
-        "warm sunset reflections, premium real-estate advertising photography, "
-        "clean central composition, no people, no text, no logos."
-    ),
-    "Downtown Dubai — Evening": (
-        "Photorealistic Downtown Dubai luxury skyline at blue hour, "
-        "modern skyscrapers, elegant city lights, premium architecture, "
-        "warm window lights, sophisticated cinematic real-estate advertising "
-        "photography, clean composition, no people, no text, no logos."
-    ),
-    "Dubai Waterfront — Night": (
-        "Photorealistic luxury Dubai waterfront at night, illuminated modern "
-        "skyscrapers, reflections on calm water, palm trees, elegant city "
-        "lights, premium cinematic real-estate advertisement, clean composition, "
-        "no people, no text, no logos."
-    ),
-    "Dubai Luxury — Daylight": (
-        "Photorealistic premium Dubai skyline in bright daylight, blue sky, "
-        "modern glass towers, palm trees, luxury waterfront architecture, "
-        "high-end real-estate campaign photography, clean composition, "
-        "no people, no text, no logos."
-    ),
+BG_COLORS = {
+    "Dubai Blue Hour": ((15, 31, 58), (78, 105, 145)),
+    "Dubai Sunset": ((39, 24, 53), (226, 132, 69)),
+    "Dubai Night": ((7, 14, 29), (32, 60, 103)),
+    "Luxury Gold": ((24, 25, 31), (121, 91, 45)),
 }
 
-EFFECT_PROMPTS = {
-    "3D Pop-Out": (
-        "Create a dramatic 3D architectural pop-out illusion. The luxury building "
-        "moves forward toward the viewer and visibly crosses the foreground frame "
-        "boundary, with upper floors and side edges extending beyond the frame. "
-        "Keep the building recognizable and structurally stable."
-    ),
-    "Cinematic Reveal": (
-        "Create a premium cinematic architectural reveal. Start with a gentle "
-        "camera push-in, then reveal the building with strong depth and parallax. "
-        "The building grows toward the viewer and partially crosses the frame edges."
-    ),
-    "Extreme Pop-Out": (
-        "Create a bold social-media 3D pop-out effect. The building rapidly moves "
-        "toward the camera, breaking the visual frame boundary with convincing "
-        "perspective and depth. Keep the architecture stable and premium."
-    ),
-}
+def gradient_bg(size, top, bottom):
+    w, h = size
+    arr = np.zeros((h, w, 3), dtype=np.uint8)
+    for y in range(h):
+        t = y / max(1, h - 1)
+        arr[y, :, :] = [int(top[i] * (1-t) + bottom[i] * t) for i in range(3)]
+    return Image.fromarray(arr, "RGB")
 
-def get_client():
-    api_key = os.getenv("RUNWAYML_API_SECRET")
-    if not api_key:
-        try:
-            api_key = st.secrets["RUNWAYML_API_SECRET"]
-        except Exception:
-            api_key = None
-    if not api_key:
-        st.error("RUNWAYML_API_SECRET is missing. Add it to your environment or Streamlit secrets.")
-        st.stop()
-    return RunwayML(api_key=api_key)
+def add_skyline(bg, seed=7):
+    rng = np.random.default_rng(seed)
+    w, h = bg.size
+    draw = __import__("PIL").ImageDraw.Draw(bg, "RGBA")
+    base = int(h * 0.73)
+    x = -20
+    while x < w:
+        bw = int(rng.integers(max(25, w//35), max(45, w//12)))
+        bh = int(rng.integers(h*0.08, h*0.30))
+        y = base - bh
+        draw.rounded_rectangle((x, y, x+bw, base+20), radius=5,
+                               fill=(18, 25, 39, 220))
+        # windows
+        for wx in range(x+7, x+bw-5, 11):
+            for wy in range(y+9, base-4, 16):
+                if rng.random() > .35:
+                    draw.rectangle((wx, wy, wx+3, wy+5), fill=(238, 193, 91, 145))
+        x += bw + int(rng.integers(5, 14))
+    # distant spire / landmark
+    cx = int(w*.72)
+    peak = int(h*.28)
+    draw.polygon([(cx-14, base), (cx+14, base), (cx+3, peak), (cx, peak-80), (cx-3, peak)], fill=(13,22,37,235))
+    draw.line((cx, peak-80, cx, peak-125), fill=(220,220,220,160), width=2)
+    # water reflection
+    for yy in range(base+25, h):
+        alpha = max(0, int(65 - (yy-base)*0.7))
+        draw.line((0, yy, w, yy), fill=(110,145,180,alpha), width=1)
+    return bg
 
-def image_to_data_uri(uploaded_file, max_bytes=4_700_000):
-    """Convert uploaded image to a Runway-safe data URI under the 5MB data-URI limit."""
-    raw = uploaded_file.getvalue()
-    try:
-        img = Image.open(io.BytesIO(raw)).convert("RGBA")
-    except Exception as e:
-        raise ValueError(f"Could not read image: {e}")
+def make_background(name, size):
+    top, bottom = BG_COLORS[name]
+    bg = gradient_bg(size, top, bottom)
+    return add_skyline(bg)
 
-    # Keep dimensions reasonable for API input.
-    max_side = 2048
-    if max(img.size) > max_side:
-        scale = max_side / max(img.size)
-        img = img.resize((int(img.width * scale), int(img.height * scale)), Image.LANCZOS)
+def fit_canvas(img, size):
+    # Preserve transparent alpha if present.
+    return ImageOps.contain(img, size, Image.Resampling.LANCZOS)
 
-    # Prefer PNG for transparency, then reduce if necessary.
-    out = io.BytesIO()
-    img.save(out, format="PNG", optimize=True)
-    data = out.getvalue()
+def paste_building(bg, building, scale, x_offset, y_offset):
+    b = building.copy().convert("RGBA")
+    target_w = max(10, int(bg.width * scale))
+    target_h = int(b.height * target_w / b.width)
+    b = b.resize((target_w, target_h), Image.Resampling.LANCZOS)
+    x = int((bg.width - target_w)/2 + x_offset)
+    y = int(bg.height - target_h + y_offset)
+    bg.alpha_composite(b, (x, y))
+    return bg
 
-    if len(data) > max_bytes:
-        # JPEG is smaller but loses transparency. Only use it when the source
-        # itself has no alpha.
-        has_alpha = img.mode == "RGBA" and img.getchannel("A").getextrema()[0] < 255
-        if not has_alpha:
-            out = io.BytesIO()
-            rgb = img.convert("RGB")
-            quality = 88
-            while quality >= 55:
-                out.seek(0)
-                out.truncate(0)
-                rgb.save(out, format="JPEG", quality=quality, optimize=True)
-                if len(out.getvalue()) <= max_bytes:
-                    break
-                quality -= 5
-            data = out.getvalue()
-            mime = "image/jpeg"
+def remove_simple_background(img):
+    # Lightweight local fallback. Works best on transparent PNGs.
+    if img.mode in ("RGBA", "LA"):
+        return img.convert("RGBA")
+    return img.convert("RGBA")
+
+def create_frame(building, size, bg_name, t, effect):
+    bg = make_background(bg_name, size).convert("RGBA")
+
+    # Slow camera move + dramatic growth.
+    if effect == "3D Pop-Out":
+        if t < .42:
+            p = t / .42
+            scale = .48 + .16 * p
+            xoff = 0
+            yoff = 0
         else:
-            # Resize further while preserving transparency.
-            while len(data) > max_bytes and max(img.size) > 900:
-                scale = 0.82
-                img = img.resize(
-                    (max(1, int(img.width * scale)), max(1, int(img.height * scale))),
-                    Image.LANCZOS,
-                )
-                out = io.BytesIO()
-                img.save(out, format="PNG", optimize=True)
-                data = out.getvalue()
-            mime = "image/png"
+            p = (t-.42)/.58
+            scale = .64 + .72 * (p**1.65)
+            xoff = 0
+            yoff = -int(size[1]*.07*p)
+    elif effect == "Extreme Pop-Out":
+        scale = .48 + 1.45*(t**1.45)
+        xoff = int(size[0]*.10*np.sin(t*4.0))
+        yoff = -int(size[1]*.10*t)
     else:
-        mime = "image/png"
+        scale = .45 + .80*t
+        xoff = 0
+        yoff = -int(size[1]*.05*t)
 
-    return f"data:{mime};base64,{base64.b64encode(data).decode('utf-8')}"
+    # Add a soft shadow to help sell depth.
+    b = remove_simple_background(building)
+    if b.getbbox():
+        shadow = Image.new("RGBA", b.size, (0,0,0,0))
+        alpha = b.getchannel("A").filter(ImageFilter.GaussianBlur(18))
+        shadow.putalpha(alpha.point(lambda a: int(a*.42)))
+        sh = shadow.resize((max(10,int(shadow.width*scale)), max(10,int(shadow.height*scale))), Image.Resampling.LANCZOS)
+        sx = int((bg.width-sh.width)/2 + xoff + size[0]*.025)
+        sy = int(bg.height-sh.height + yoff + size[1]*.015)
+        bg.alpha_composite(sh, (sx, sy))
 
-def generate_background(client, prompt, ratio):
-    task = client.text_to_image.create(
-        model="gen4_image",
-        ratio=ratio,
-        prompt_text=prompt,
-    )
-    result = task.wait_for_task_output(timeout=600)
-    return result.output[0]
+    paste_building(bg, b, scale, xoff, yoff)
+    return bg.convert("RGB")
 
-def download_url(url, output_path):
-    import requests
-    r = requests.get(url, timeout=120)
-    r.raise_for_status()
-    Path(output_path).write_bytes(r.content)
-
-def create_video(client, image_uri, prompt, ratio, duration):
-    task = client.image_to_video.create(
-        model="gen4.5",
-        prompt_image=image_uri,
-        prompt_text=prompt,
-        ratio=ratio,
-        duration=duration,
-    )
-    return task.wait_for_task_output(timeout=900)
-
-# -----------------------------
-# UI
-# -----------------------------
 st.title("🏙️ Dubai 3D Pop-Out Video Generator")
-st.caption("Turn a luxury property/building image into an engaging Dubai real-estate pop-out video.")
+st.caption("100% local effect generator — no Runway API, no credits, no paid video API.")
 
 with st.sidebar:
-    st.header("🎬 Video Settings")
-    ratio_label = st.selectbox("Format", list(RATIOS.keys()), index=0)
-    ratio, target_size = RATIOS[ratio_label]
-
-    duration = st.selectbox("Duration", [5, 10], index=0)
-    effect_name = st.selectbox("Effect", list(EFFECT_PROMPTS.keys()), index=0)
-
-    st.divider()
-    st.header("🌆 Background")
-
-    bg_mode = st.radio(
-        "Background source",
-        ["Generate Dubai background with AI", "Upload background"],
-    )
-
-    bg_prompt = None
-    bg_file = None
-
-    if bg_mode == "Generate Dubai background with AI":
-        bg_style = st.selectbox("Dubai scene", list(BACKGROUND_PROMPTS.keys()))
-        bg_prompt = BACKGROUND_PROMPTS[bg_style]
-    else:
-        bg_file = st.file_uploader(
-            "Upload background",
-            type=["png", "jpg", "jpeg", "webp"],
-            help="Use a clean Dubai skyline/waterfront image.",
-        )
-
-    st.divider()
-    st.info(
-        "Best input: a PNG building with transparent background. "
-        "The tool preserves the building and adds a Dubai environment behind it."
-    )
+    st.header("Video Settings")
+    ratio_name = st.selectbox("Format", list(RATIOS.keys()))
+    size = RATIOS[ratio_name]
+    fps = st.selectbox("FPS", [24, 30], index=1)
+    duration = st.selectbox("Duration", [5, 6, 8], index=1)
+    bg_name = st.selectbox("Dubai Background", list(BG_COLORS.keys()))
+    effect = st.selectbox("Effect", ["3D Pop-Out", "Cinematic Reveal", "Extreme Pop-Out"])
+    seed = st.number_input("Background variation", 1, 9999, 7)
 
 st.subheader("1. Upload Building")
 building_file = st.file_uploader(
-    "Upload your luxury building / tower PNG",
-    type=["png", "jpg", "jpeg", "webp"],
-    help="Transparent PNG is strongly recommended for clean pop-out results.",
+    "Upload a building PNG/JPG/WebP",
+    type=["png","jpg","jpeg","webp"],
+    help="Transparent PNG gives the cleanest result."
 )
 
 if building_file:
-    c1, c2 = st.columns(2)
-    with c1:
-        st.image(building_file, caption="Building reference", use_container_width=True)
-    with c2:
-        st.markdown("### Recommended")
-        st.write("• Transparent PNG")
-        st.write("• Building centered")
-        st.write("• Clean edges")
-        st.write("• No text or logos")
-        st.write("• 640px+ on the shortest side")
+    building = Image.open(building_file).convert("RGBA")
+    st.image(building, caption="Building", width=360)
 
-st.subheader("2. Generate")
-generate = st.button("🚀 Generate Pop-Out Video", type="primary", use_container_width=True)
+    st.subheader("2. Preview")
+    preview = create_frame(building, size, bg_name, 0.72, effect)
+    st.image(preview, caption="Pop-out preview", use_container_width=True)
 
-if generate:
-    if not building_file:
-        st.error("Please upload the building image first.")
-        st.stop()
+    if st.button("🎬 Generate MP4", type="primary", use_container_width=True):
+        out = "/mnt/data/dubai_popout_free.mp4"
+        frames = []
+        total = fps * duration
+        progress = st.progress(0)
+        status = st.empty()
 
-    client = get_client()
+        writer = imageio.get_writer(
+            out,
+            fps=fps,
+            codec="libx264",
+            quality=7,
+            pixelformat="yuv420p",
+        )
+        try:
+            for i in range(total):
+                t = i / max(1, total-1)
+                frame = create_frame(building, size, bg_name, t, effect)
+                writer.append_data(np.asarray(frame))
+                if i % max(1, total//30) == 0:
+                    progress.progress((i+1)/total)
+                    status.write(f"Rendering frame {i+1}/{total}…")
+        finally:
+            writer.close()
 
-    try:
-        with st.status("Preparing your Dubai scene...", expanded=True) as status:
-            st.write("✓ Reading building image")
-            building_uri = image_to_data_uri(building_file)
-
-            # Background
-            if bg_mode == "Generate Dubai background with AI":
-                st.write("⏳ Generating Dubai background...")
-                bg_url = generate_background(client, bg_prompt, ratio)
-                st.write("✓ Dubai background generated")
-            else:
-                if not bg_file:
-                    st.error("Please upload a background image.")
-                    st.stop()
-                bg_url = None
-
-            # If a custom background is supplied, use it as the starting frame.
-            # The prompt asks the video model to preserve the building reference
-            # while creating the pop-out motion.
-            st.write("⏳ Creating the image-to-video scene...")
-
-            custom_bg_note = ""
-            if bg_file:
-                bg_uri = image_to_data_uri(bg_file)
-                # Use the background as the image-to-video frame when supplied.
-                # The building image is explicitly described in the prompt, but
-                # cannot be sent as a second reference in the basic Gen-4.5 call.
-                # Therefore, for maximum fidelity, AI background mode is preferred.
-                base_uri = building_uri
-                custom_bg_note = (
-                    "Use a premium Dubai-style environment and keep the provided "
-                    "building as the dominant foreground architectural subject. "
-                )
-            else:
-                base_uri = building_uri
-
-            motion_prompt = f"""
-{EFFECT_PROMPTS[effect_name]}
-
-Scene direction:
-Luxury Dubai real-estate advertisement. A sophisticated Dubai skyline,
-waterfront, palm trees and premium city lighting create an engaging cinematic
-background. The uploaded building is the hero architectural subject.
-
-The building must remain recognizable and realistic. Do not turn it into a
-person, character, product, vehicle or unrelated object.
-
-{custom_bg_note}
-
-Motion:
-Begin with a subtle cinematic camera push toward the building.
-Then increase depth and parallax so the building appears to move toward the
-viewer and cross the foreground frame boundary. The upper floors and side
-edges can extend beyond the visible frame. Finish on a strong premium
-architectural hero shot.
-
-Visual quality:
-photorealistic, luxury property advertisement, realistic reflections,
-natural lighting, stable geometry, smooth motion, high detail.
-
-Avoid:
-people, faces, text, captions, logos, watermarks, warped architecture,
-melting windows, duplicated buildings, shaky camera, transparent background.
-""".strip()
-
-            result = create_video(
-                client,
-                base_uri,
-                motion_prompt,
-                ratio,
-                duration,
-            )
-
-            video_url = result.output[0]
-            video_path = "/mnt/data/dubai_popout_result.mp4"
-            download_url(video_url, video_path)
-
-            status.update(label="Video generated successfully!", state="complete")
-
-        st.success("🎉 Your Dubai 3D pop-out video is ready.")
-        st.video(video_path)
-
-        with open(video_path, "rb") as f:
+        progress.progress(1.0)
+        status.success("Video ready!")
+        st.video(out)
+        with open(out, "rb") as f:
             st.download_button(
                 "⬇️ Download MP4",
-                data=f,
+                f,
                 file_name="dubai_3d_popout.mp4",
                 mime="video/mp4",
                 use_container_width=True,
             )
-
-        st.caption(
-            "Tip: For the cleanest building cutout, upload a transparent PNG. "
-            "For a true custom background + exact building compositing workflow, "
-            "the next version can add automatic background removal and local compositing."
-        )
-
-    except TaskFailedError as e:
-        st.error("Runway generation failed.")
-        st.code(str(e.task_details))
-    except TaskTimeoutError:
-        st.error("The video generation timed out. Try again or use a 5-second video.")
-    except Exception as e:
-        st.error("Something went wrong.")
-        st.exception(e)
-
-st.divider()
-st.caption("Built for luxury Dubai real-estate creatives • Runway API required")
+else:
+    st.info("Upload your building image to start.")
